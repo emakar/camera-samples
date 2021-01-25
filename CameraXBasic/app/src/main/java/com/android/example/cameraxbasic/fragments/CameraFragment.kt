@@ -17,7 +17,9 @@
 package com.android.example.cameraxbasic.fragments
 
 import android.annotation.SuppressLint
+import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Bundle
 import android.util.DisplayMetrics
@@ -155,6 +157,7 @@ class CameraFragment : Fragment() {
             }
             updateCameraSwitchButton()
             bindCameraUseCases()
+            startRec()
         }
     }
 
@@ -199,6 +202,7 @@ class CameraFragment : Fragment() {
 
         try {
             camera = cameraProvider.bindToLifecycle(this, cameraSelector, preview, videoCapture, imageCapture)
+            container.findViewById<CameraInputLayout>(R.id.camera_input).camera = camera
 
             preview.setSurfaceProvider(viewFinder.surfaceProvider)
         } catch (exc: Exception) {
@@ -225,6 +229,8 @@ class CameraFragment : Fragment() {
         return AspectRatio.RATIO_16_9
     }
 
+    var recording = false
+
     /** Method used to re-draw the camera UI controls, called every time configuration changes. */
     private fun updateCameraUi() {
 
@@ -246,41 +252,14 @@ class CameraFragment : Fragment() {
             }
         }
 
-        var recording = false
-
         // Listener for button used to capture photo
         controls.findViewById<ImageButton>(R.id.camera_capture_button).setOnClickListener {
-            val videoFile = createFile(outputDirectory, FILENAME, ".mp4")
-            val packageManager = context.packageManager
-
             videoCapture?.let { videoCapture ->
                 if (recording) {
                     recording = false
                     videoCapture.stopRecording(true)
                 } else {
-                    recording = true
-                    val options = VideoCapture.OutputFileOptions.Builder(videoFile).build()
-                    controls.findViewById<CameraInputLayout>(R.id.camera_input).camera = camera
-                    videoCapture.startRecording(options, cameraExecutor, object : VideoCapture.OnVideoSavedCallback {
-                        override fun onVideoSaved(outputFileResults: VideoCapture.OutputFileResults) {
-                            val savedUri = outputFileResults.savedUri ?: Uri.fromFile(videoFile)
-                            Log.d(TAG, "Photo capture succeeded: $savedUri")
-
-                            val uri = FileProvider.getUriForFile(context, "${context.packageName}.provider", videoFile)
-                            val intent = Intent()
-                                .setAction(Intent.ACTION_VIEW)
-                                .setDataAndType(uri, "video/mp4")
-                                .setFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-
-                            if (intent.resolveActivity(packageManager) != null) {
-                                startActivity(intent)
-                            }
-                        }
-
-                        override fun onError(videoCaptureError: Int, message: String, cause: Throwable?) {
-                            Log.e("CameraTest", "onCameraError", cause)
-                        }
-                    })
+                    startRec()
                 }
             }
         }
@@ -313,6 +292,35 @@ class CameraFragment : Fragment() {
                         .actionCameraToGallery(outputDirectory.absolutePath))
             }
         }
+    }
+
+    private fun startRec() {
+        val context = requireContext()
+        val videoFile = createFile(outputDirectory, FILENAME, ".mp4")
+        val packageManager = context.packageManager
+
+        recording = true
+        val options = VideoCapture.OutputFileOptions.Builder(videoFile).build()
+        videoCapture.startRecording(options, cameraExecutor, object : VideoCapture.OnVideoSavedCallback {
+            override fun onVideoSaved(outputFileResults: VideoCapture.OutputFileResults) {
+                val savedUri = outputFileResults.savedUri ?: Uri.fromFile(videoFile)
+                Log.d(TAG, "Photo capture succeeded: $savedUri")
+
+                val uri = FileProvider.getUriForFile(context, "${context.packageName}.provider", videoFile)
+                val intent = Intent()
+                    .setAction(Intent.ACTION_VIEW)
+                    .setDataAndType(uri, "video/mp4")
+                    .setFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+
+                if (intent.resolveActivity(packageManager) != null) {
+                    startActivity(intent)
+                }
+            }
+
+            override fun onError(videoCaptureError: Int, message: String, cause: Throwable?) {
+                Log.e("CameraTest", "onCameraError", cause)
+            }
+        })
     }
 
     /** Enabled or disabled a button to switch cameras depending on the available cameras */

@@ -20,6 +20,8 @@ import android.annotation.SuppressLint
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.Bitmap
+import android.graphics.ImageFormat
 import android.net.Uri
 import android.os.Bundle
 import android.util.DisplayMetrics
@@ -33,12 +35,15 @@ import androidx.camera.core.AspectRatio
 import androidx.camera.core.Camera
 import androidx.camera.core.CameraInfoUnavailableException
 import androidx.camera.core.CameraSelector
+import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageCapture
+import androidx.camera.core.ImageProxy
+import androidx.camera.core.Logger
 import androidx.camera.core.Preview
+import androidx.camera.core.impl.utils.executor.CameraXExecutors
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.constraintlayout.widget.ConstraintLayout
-import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
 import androidx.core.view.doOnLayout
 import androidx.core.view.setPadding
@@ -79,10 +84,19 @@ class CameraFragment : Fragment() {
     private lateinit var preview: Preview
     private lateinit var imageCapture: ImageCapture
     private lateinit var videoCapture: VideoCapture
+
+    private var imageAnalysis: ImageAnalysis? = null
+    private val analysisExecutor = Executors.newSingleThreadExecutor()
+    private var capturedImage: Bitmap? = null
+    private var currentMaxResolution: Size? = null
+
+    private lateinit var frameProcessor: FrameProcessor
+    private lateinit var yuvToRgbConverter: YuvToRgbConverter
+
     private lateinit var camera: Camera
     private lateinit var cameraProvider: ProcessCameraProvider
 
-    private val cameraExecutor = Executors.newSingleThreadExecutor()
+    private val cameraExecutor = CameraXExecutors.mainThreadExecutor()
 
     override fun onResume() {
         super.onResume()
@@ -99,8 +113,10 @@ class CameraFragment : Fragment() {
         super.onDestroyView()
 
         // Shut down our background executor
-        cameraExecutor.shutdown()
+//        cameraExecutor.shutdown()
         initCameraJob?.cancel()
+        imageAnalysis?.clearAnalyzer()
+        yuvToRgbConverter.destroy()
         scope.coroutineContext.cancelChildren()
     }
 
@@ -134,7 +150,11 @@ class CameraFragment : Fragment() {
         container = view as ConstraintLayout
         viewFinder = container.findViewById(R.id.view_finder)
 
-        outputDirectory = MainActivity.getOutputDirectory(requireContext())
+        val context = requireContext()
+        outputDirectory = MainActivity.getOutputDirectory(context)
+
+        frameProcessor = FrameProcessor(context, 10_000)
+        yuvToRgbConverter = YuvToRgbConverter(context)
 
         viewFinder.doOnLayout {
             updateCameraUi()
@@ -157,12 +177,12 @@ class CameraFragment : Fragment() {
             }
             updateCameraSwitchButton()
             bindCameraUseCases()
-            startRec()
+//            startRec()
         }
     }
 
     /** Declare and bind preview, capture and analysis use cases */
-    private fun bindCameraUseCases() {
+    private fun bindCameraUseCases(maxResolution: Size? = Size(1280, 720)) {
         val metrics = DisplayMetrics().also { viewFinder.display.getRealMetrics(it) }
         val screenAspectRatio = aspectRatio(metrics.widthPixels, metrics.heightPixels)
 
@@ -172,36 +192,45 @@ class CameraFragment : Fragment() {
 
         val cameraSelector = CameraSelector.Builder().requireLensFacing(lensFacing).build()
 
+        currentMaxResolution = maxResolution
+
         // Preview
         preview = Preview.Builder()
-                // We request aspect ratio but no resolution
-                .setTargetAspectRatio(screenAspectRatio)
-                // Set initial target rotation
-                .setTargetRotation(rotation)
-                .build()
+            .apply {
+                maxResolution?.let { setMaxResolution(it) }
+            }
+            .build()
 
         videoCapture = VideoCapture.Builder()
-            .setVideoFrameRate(30)
-            .setBitRate(600)
+//            .setVideoFrameRate(30)
+//            .setBitRate(600)
 //            .setMaxResolution()
             .build()
 
+        imageAnalysis?.clearAnalyzer()
+        imageAnalysis = ImageAnalysis.Builder()
+            .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+            .build()
+            .also {
+                it.setAnalyzer(analysisExecutor, imageAnalyzer)
+            }
+
         // ImageCapture
-        imageCapture = ImageCapture.Builder()
-                .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
-                // We request aspect ratio but no resolution to match preview config, but letting
-                // CameraX optimize for whatever specific resolution best fits our use cases
-                .setTargetAspectRatio(screenAspectRatio)
-                // Set initial target rotation, we will have to call this again if rotation changes
-                // during the lifecycle of this use case
-                .setTargetRotation(rotation)
-                .build()
+//        imageCapture = ImageCapture.Builder()
+//                .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
+//                // We request aspect ratio but no resolution to match preview config, but letting
+//                // CameraX optimize for whatever specific resolution best fits our use cases
+//                .setTargetAspectRatio(screenAspectRatio)
+//                // Set initial target rotation, we will have to call this again if rotation changes
+//                // during the lifecycle of this use case
+//                .setTargetRotation(rotation)
+//                .build()
 
         // Must unbind the use-cases before rebinding them
         cameraProvider.unbindAll()
 
         try {
-            camera = cameraProvider.bindToLifecycle(this, cameraSelector, preview, videoCapture, imageCapture)
+            camera = cameraProvider.bindToLifecycle(this, cameraSelector, preview, imageAnalysis)
             container.findViewById<CameraInputLayout>(R.id.camera_input).camera = camera
 
             preview.setSurfaceProvider(viewFinder.surfaceProvider)
@@ -210,6 +239,11 @@ class CameraFragment : Fragment() {
         }
     }
 
+    private val imageAnalyzer = ImageAnalysis.Analyzer { proxy ->
+        val frame = proxy.use { it.toBitmap() }
+        capturedImage = frame
+        frame?.let { frameProcessor.processFrame(it) }
+    }
     /**
      *  [androidx.camera.core.impl.ImageAnalysisConfig] requires enum value of
      *  [androidx.camera.core.AspectRatio]. Currently it has values of 4:3 & 16:9.
@@ -254,13 +288,18 @@ class CameraFragment : Fragment() {
 
         // Listener for button used to capture photo
         controls.findViewById<ImageButton>(R.id.camera_capture_button).setOnClickListener {
-            videoCapture?.let { videoCapture ->
-                if (recording) {
-                    recording = false
-                    videoCapture.stopRecording(true)
-                } else {
-                    startRec()
+            if (recording) {
+                recording = false
+//                videoCapture.stopRecording(true)
+                frameProcessor.stop()?.let { storage ->
+                    scope.launch {
+                        Grabber.process(requireContext(), storage)?.let { video ->
+                            openVideo(video)
+                        }
+                    }
                 }
+            } else {
+                startRec()
             }
         }
 
@@ -297,30 +336,23 @@ class CameraFragment : Fragment() {
     private fun startRec() {
         val context = requireContext()
         val videoFile = createFile(outputDirectory, FILENAME, ".mp4")
-        val packageManager = context.packageManager
 
         recording = true
-        val options = VideoCapture.OutputFileOptions.Builder(videoFile).build()
-        videoCapture.startRecording(options, cameraExecutor, object : VideoCapture.OnVideoSavedCallback {
-            override fun onVideoSaved(outputFileResults: VideoCapture.OutputFileResults) {
-                val savedUri = outputFileResults.savedUri ?: Uri.fromFile(videoFile)
-                Log.d(TAG, "Photo capture succeeded: $savedUri")
-
-                val uri = FileProvider.getUriForFile(context, "${context.packageName}.provider", videoFile)
-                val intent = Intent()
-                    .setAction(Intent.ACTION_VIEW)
-                    .setDataAndType(uri, "video/mp4")
-                    .setFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-
-                if (intent.resolveActivity(packageManager) != null) {
-                    startActivity(intent)
-                }
-            }
-
-            override fun onError(videoCaptureError: Int, message: String, cause: Throwable?) {
-                Log.e("CameraTest", "onCameraError", cause)
-            }
-        })
+        frameProcessor.stop()
+        frameProcessor.start("key")
+//        val options = VideoCapture.OutputFileOptions.Builder(videoFile).build()
+//        videoCapture.startRecording(options, cameraExecutor, object : VideoCapture.OnVideoSavedCallback {
+//            override fun onVideoSaved(outputFileResults: VideoCapture.OutputFileResults) {
+//                val savedUri = outputFileResults.savedUri ?: Uri.fromFile(videoFile)
+//                Log.d(TAG, "Photo capture succeeded: $savedUri")
+//
+//                openVideo(videoFile)
+//            }
+//
+//            override fun onError(videoCaptureError: Int, message: String, cause: Throwable?) {
+//                Log.e("CameraTest", "onCameraError", cause)
+//            }
+//        })
     }
 
     /** Enabled or disabled a button to switch cameras depending on the available cameras */
@@ -341,6 +373,51 @@ class CameraFragment : Fragment() {
     /** Returns true if the device has an available front camera. False otherwise */
     private fun hasFrontCamera(): Boolean {
         return cameraProvider.hasCamera(CameraSelector.DEFAULT_FRONT_CAMERA) ?: false
+    }
+
+    @SuppressLint("UnsafeExperimentalUsageError")
+    private fun ImageProxy.toBitmap(): Bitmap? {
+        val image = image ?: return null
+        val resolution = currentMaxResolution
+        val maxHeight = resolution?.height
+        val maxWidth = resolution?.width
+        val imageHeight = image.cropRect.height()
+        val imageWidth = image.cropRect.width()
+        return when (image.format) {
+            ImageFormat.YUV_420_888 -> {
+                val bitmap = Bitmap.createBitmap(image.width, image.height, Bitmap.Config.ARGB_8888)
+                yuvToRgbConverter.yuvToRgb(image, bitmap)
+                bitmap
+            }
+            ImageFormat.JPEG -> {
+                JpegToRgbConverter.jpegToRgb(image)
+            }
+            else -> {
+                Logger.d("CameraFragment", "unsupported format: ${image.format}")
+                null
+            }
+        }?.transform(
+            rotation = imageInfo.rotationDegrees,
+            scale = if (maxHeight != null && maxWidth != null && (imageHeight > maxHeight || imageWidth > maxWidth)) {
+                min(maxHeight.toFloat() / imageHeight, maxWidth.toFloat() / imageWidth)
+            } else {
+                1f
+            }
+        )
+    }
+
+    private fun openVideo(videoFile: File) {
+        val context = requireContext()
+        val packageManager = context.packageManager
+        val uri = FileProvider.getUriForFile(context, "${context.packageName}.provider", videoFile)
+        val intent = Intent()
+            .setAction(Intent.ACTION_VIEW)
+            .setDataAndType(uri, "video/mp4")
+            .setFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+
+        if (intent.resolveActivity(packageManager) != null) {
+            startActivity(intent)
+        }
     }
 
     companion object {

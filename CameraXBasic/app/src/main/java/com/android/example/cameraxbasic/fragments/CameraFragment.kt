@@ -211,9 +211,6 @@ class CameraFragment : Fragment() {
         imageAnalysis = ImageAnalysis.Builder()
             .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
             .build()
-            .also {
-                it.setAnalyzer(analysisExecutor, imageAnalyzer)
-            }
 
         // ImageCapture
 //        imageCapture = ImageCapture.Builder()
@@ -290,6 +287,7 @@ class CameraFragment : Fragment() {
         controls.findViewById<ImageButton>(R.id.camera_capture_button).setOnClickListener {
             if (recording) {
                 recording = false
+                imageAnalysis?.clearAnalyzer()
 //                videoCapture.stopRecording(true)
                 frameProcessor.stop()?.let { storage ->
                     scope.launch {
@@ -334,12 +332,10 @@ class CameraFragment : Fragment() {
     }
 
     private fun startRec() {
-        val context = requireContext()
-        val videoFile = createFile(outputDirectory, FILENAME, ".mp4")
-
         recording = true
         frameProcessor.stop()
         frameProcessor.start("key")
+        imageAnalysis?.setAnalyzer(analysisExecutor, imageAnalyzer)
 //        val options = VideoCapture.OutputFileOptions.Builder(videoFile).build()
 //        videoCapture.startRecording(options, cameraExecutor, object : VideoCapture.OnVideoSavedCallback {
 //            override fun onVideoSaved(outputFileResults: VideoCapture.OutputFileResults) {

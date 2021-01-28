@@ -17,7 +17,7 @@ class FrameStorage(
 ) {
 
     private val times = arrayListOf<Long>()
-    private val root = File(context.filesDir, "frames_$key")
+    val root = File(context.filesDir, "frames_$key")
 
     private val _frames = ArrayList<File>(64)
     val frames: List<File> get() = _frames.toList()

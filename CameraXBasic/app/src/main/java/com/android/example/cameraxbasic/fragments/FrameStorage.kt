@@ -29,23 +29,15 @@ class FrameStorage(
             return if (times.size > 1) times.last() - times.first() else 0L
         }
 
-    var width: Int = 0
-        private set
-
-    var height: Int = 0
-        private set
-
     val fps: Int
         get() = ceil(frames.size.toDouble() / duration.toDouble() * 1000.0).toInt()
 
     init {
         root.mkdir()
+        root.listFiles()?.forEach { it.delete() }
     }
 
     fun append(frame: Bitmap) {
-        width = frame.width
-        height = frame.height
-
         val time = System.currentTimeMillis()
         while (times.isNotEmpty() && _frames.isNotEmpty() && time - times.first() > maxDuration) {
             times.removeAt(0)

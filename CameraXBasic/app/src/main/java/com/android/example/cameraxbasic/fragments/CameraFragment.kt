@@ -116,7 +116,6 @@ class CameraFragment : Fragment() {
 //        cameraExecutor.shutdown()
         initCameraJob?.cancel()
         imageAnalysis?.clearAnalyzer()
-        yuvToRgbConverter.destroy()
         scope.coroutineContext.cancelChildren()
     }
 

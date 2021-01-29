@@ -24,6 +24,9 @@ class FrameStorage(
 
     private var allFrames = 0
 
+    var startFrame = 0
+        private set
+
     private val duration: Long
         get() {
             return if (times.size > 1) times.last() - times.first() else 0L
@@ -46,6 +49,7 @@ class FrameStorage(
                 firstFrame.delete()
             }
             _frames.removeAt(0)
+            startFrame++
         }
 
         try {

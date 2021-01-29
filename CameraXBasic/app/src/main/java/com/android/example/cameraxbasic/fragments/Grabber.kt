@@ -43,6 +43,8 @@ object Grabber {
                 arrayOf(
                     "-r",
                     storage.fps.toString(),
+                    "-start_number",
+                    "${storage.startFrame}",
                     "-i",
                     "${storage.root}/frame_%d.jpg",
                     "-f",
